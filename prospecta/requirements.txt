@@ -1,0 +1,12 @@
+# Servidor web e API
+starlette>=1.7,<2
+uvicorn>=0.34
+python-multipart>=0.0.18
+pydantic>=2.12,<3
+# HTTP (Google Places, análise de sites, API do Claude)
+requests>=2.32
+python-dotenv>=1.0
+# Fuso horário no Windows (no Linux/macOS o sistema já tem)
+tzdata>=2024.1; sys_platform == "win32"
+# Servidor MCP (integração com o Claude Desktop)
+mcp>=2.3,<3

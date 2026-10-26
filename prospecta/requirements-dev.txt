@@ -1,0 +1,3 @@
+-r requirements.txt
+# Cliente HTTP usado pelo TestClient do Starlette nos testes
+httpx2>=2.10
