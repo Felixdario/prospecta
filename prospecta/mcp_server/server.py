@@ -73,20 +73,22 @@ api = Api(API_URL, os.environ.get("PROSPECTA_TOKEN", ""))
 
 
 def _lead_summary(item: dict) -> dict:
-    keys = ("id", "name", "category", "neighborhood", "city", "phone", "phone_kind", "website", "presence_kind",
+    keys = ("id", "name", "category", "neighborhood", "city", "country", "phone", "phone_kind", "website", "presence_kind",
             "rating", "reviews_count", "score", "priority", "status")
     return {k: item.get(k) for k in keys}
 
 
 @server.tool(annotations=SEARCH)
-def search_companies(segment: str, city: str, state: str = "", regions: Optional[list[str]] = None, max_results: int = 20,
+def search_companies(segment: str, city: str, state: str = "", country: Literal["BR", "US", "CA", "GB", "AU"] = "BR",
+                     regions: Optional[list[str]] = None, max_results: int = 20,
                      website_filter: Literal["todos", "sem_site", "sem_site_proprio", "com_site"] = "sem_site_proprio",
                      min_rating: Optional[float] = None, min_reviews: Optional[int] = None, only_mobile: bool = False,
                      wait_seconds: int = 90) -> dict:
     """Pesquisa empresas no Google (Places API oficial) por segmento e cidade, salva, analisa e pontua.
-    Consome cota da API do Google (cada 20 resultados ≈ 1 chamada). Bairros em `regions` geram uma
-    consulta por bairro. Aguarda até `wait_seconds` e devolve os leads encontrados por pontuação."""
-    body = {"segment": segment, "city": city, "state": state or None, "regions": regions or [], "max_results": max_results,
+    `country`: BR (padrão), US, CA, GB ou AU. Fora do Brasil, escreva o segmento em inglês (ex.: "dentists")
+    e as mensagens saem em inglês. Consome cota da API do Google (cada 20 resultados ≈ 1 chamada).
+    Bairros em `regions` geram uma consulta por bairro. Aguarda até `wait_seconds` e devolve os leads por pontuação."""
+    body = {"country": country, "segment": segment, "city": city, "state": state or None, "regions": regions or [], "max_results": max_results,
             "filters": {"website": website_filter, "min_rating": min_rating, "min_reviews": min_reviews,
                         "require_phone": True, "only_mobile": only_mobile}}
     job = api.call("POST", "/api/searches", json=body)
@@ -112,12 +114,12 @@ def get_search_status(search_id: int) -> dict:
 
 
 @server.tool(annotations=READ)
-def list_leads(query: str = "", status: str = "", priority: str = "", presence: str = "", city: str = "",
+def list_leads(query: str = "", status: str = "", priority: str = "", presence: str = "", city: str = "", country: str = "",
                min_score: Optional[int] = None, sort: Literal["score", "recent", "name", "updated", "reviews"] = "score",
                limit: int = 20) -> dict:
     """Lista leads salvos com filtros. status/priority/presence aceitam vários valores separados por vírgula.
     presence: sem_site, com_site, limitada, rede_social, plataforma_terceiros, google_descontinuado."""
-    params = {"q": query, "status": status, "priority": priority, "presence": presence, "city": city,
+    params = {"q": query, "status": status, "priority": priority, "presence": presence, "city": city, "country": country,
               "min_score": min_score, "sort": sort, "page_size": max(1, min(limit, 50))}
     data = api.call("GET", "/api/leads", params={k: v for k, v in params.items() if v not in ("", None)})
     return {"total": data["total"], "leads": [_lead_summary(i) for i in data["items"]]}
@@ -129,7 +131,9 @@ def get_company_details(lead_id: int) -> dict:
     (fatos verificados x hipóteses), mensagem sugerida, política de contato, histórico e tarefas."""
     d = api.call("GET", f"/api/leads/{lead_id}")
     lead = d["lead"]
-    keep = ("id", "name", "category", "segment", "address", "neighborhood", "city", "state", "phone", "phone_kind", "website",
+    keep = ("id", "name", "category", "segment", "address", "neighborhood", "city", "state", "country", "language",
+            "utc_offset_minutes", "phone", "phone_e164", "phone_kind", "website", "whatsapp_e164", "whatsapp_source",
+            "whatsapp_status", "emails", "message_channel", "message_subject",
             "maps_url", "rating", "reviews_count", "opening_hours", "business_status", "presence_kind", "social_links",
             "score", "priority", "status", "consent_status", "responsible_name", "notes", "suggested_message",
             "message_variant", "message_warnings", "preview_ready", "source", "google_fetched_at")
@@ -141,6 +145,8 @@ def get_company_details(lead_id: int) -> dict:
         "proxima_acao": d["next_action"],
         "contato": {k: d["contact"].get(k) for k in ("allowed", "blockers", "warnings", "outbound_total", "last_outbound_at", "last_reply_at")},
         "hipotese_whatsapp": d["whatsapp_hypothesis"],
+        "canais": d.get("channels"),
+        "canal_recomendado": d.get("best_channel"),
         "historico": d["events"][:15],
         "tarefas_abertas": [t for t in d["tasks"] if not t["done"]],
     }
@@ -163,13 +169,17 @@ def score_lead(lead_id: int) -> dict:
 
 @server.tool(annotations=WRITE)
 def generate_outreach_message(lead_id: int, variant: Optional[Literal[
-        "sem_site", "presenca_limitada", "site_desatualizado", "site_existente", "responsavel_nao_identificado",
-        "follow_up", "resposta_interesse", "pedido_informacoes", "outro_horario", "opt_out"]] = None,
+        "abertura_curta", "sem_site", "presenca_limitada", "site_desatualizado", "site_existente", "responsavel_nao_identificado",
+        "roteiro_ligacao", "follow_up", "follow_up_final", "resposta_interesse", "pedido_informacoes", "outro_horario",
+        "opt_out"]] = None,
+        channel: Optional[Literal["whatsapp", "instagram", "facebook", "email", "formulario", "ligacao"]] = None,
         use_ai: bool = False) -> dict:
     """Gera um RASCUNHO de mensagem para revisão humana (o envio é sempre feito por uma pessoa).
-    Sem `variant`, o sistema escolhe pela situação do lead. Retorna avisos do verificador de linguagem."""
-    d = api.call("POST", f"/api/leads/{lead_id}/message", json={"variant": variant, "use_ai": use_ai})
-    return {"mensagem": d["message"], "variacao": d["variant"], "gerada_por": d["generated_by"], "avisos": d["warnings"],
+    Sem `variant`, o sistema escolhe pela situação do lead; sem `channel`, usa o canal recomendado.
+    E-mails vêm com assunto. Retorna avisos do verificador de linguagem."""
+    d = api.call("POST", f"/api/leads/{lead_id}/message", json={"variant": variant, "channel": channel, "use_ai": use_ai})
+    return {"mensagem": d["message"], "assunto": d.get("subject"), "canal": d.get("channel"), "variacao": d["variant"],
+            "gerada_por": d["generated_by"], "avisos": d["warnings"],
             "pode_contatar_agora": d["contact"]["allowed"], "bloqueios": d["contact"]["blockers"],
             "lembrete": "Rascunho para revisão. Quem envia é o usuário, pelo painel ou WhatsApp."}
 
@@ -194,9 +204,12 @@ def update_lead_status(lead_id: int, status: Literal[
 
 
 @server.tool(annotations=WRITE)
-def log_interaction(lead_id: int, type: Literal["resposta_recebida", "ligacao", "reuniao", "proposta", "nota", "opt_out"],
-                    summary: str, channel: Optional[Literal["whatsapp", "telefone", "email", "presencial", "instagram", "outro"]] = None) -> dict:
-    """Registra no histórico uma resposta, ligação, reunião, proposta, anotação ou pedido de não contato (opt_out)."""
+def log_interaction(lead_id: int, type: Literal["resposta_recebida", "ligacao", "reuniao", "proposta", "nota", "opt_out",
+                                                "sem_whatsapp"],
+                    summary: str, channel: Optional[Literal["whatsapp", "telefone", "email", "formulario_site", "instagram",
+                                                            "facebook", "presencial", "outro"]] = None) -> dict:
+    """Registra no histórico uma resposta, ligação, reunião, proposta, anotação, pedido de não contato (opt_out)
+    ou que o número não tem WhatsApp (sem_whatsapp)."""
     d = api.call("POST", f"/api/leads/{lead_id}/interactions", json={"type": type, "summary": summary, "channel": channel})
     return {"id": lead_id, "status": d["lead"]["status"], "proxima_acao": d["next_action"]}
 

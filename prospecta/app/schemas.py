@@ -6,6 +6,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .channels import normalize_facebook, normalize_instagram
+from .countries import COUNTRIES
+from .segments import SEGMENTS
 from .messages import VARIANTS
 from .pipeline import CHANNELS, MANUAL_EVENT_TYPES, STATUSES
 
@@ -29,7 +32,9 @@ class FiltersIn(Strict):
 
 
 class SearchIn(Strict):
+    country: Literal[tuple(COUNTRIES)] = "BR"  # type: ignore[valid-type]
     segment: str = Field(min_length=2, max_length=80)
+    segment_group: Optional[Literal[tuple(s.key for s in SEGMENTS)]] = None  # type: ignore[valid-type]
     city: str = Field(min_length=2, max_length=80)
     state: Optional[str] = Field(None, max_length=30)
     regions: list[str] = Field(default_factory=list, max_length=10)
@@ -61,10 +66,48 @@ class LeadPatch(Strict):
     preview_ready: Optional[bool] = None
     preview_url: Optional[str] = Field(None, max_length=300)
     suggested_message: Optional[str] = Field(None, max_length=2000)
+    language: Optional[Literal["pt", "en"]] = None
+    country: Optional[Literal[tuple(COUNTRIES)]] = None  # type: ignore[valid-type]
+    whatsapp: Optional[str] = Field(None, max_length=40)
+    emails: Optional[str] = Field(None, max_length=300)
+    message_subject: Optional[str] = Field(None, max_length=200)
+    instagram: Optional[str] = Field(None, max_length=200)
+    facebook: Optional[str] = Field(None, max_length=300)
+
+    @field_validator("instagram")
+    @classmethod
+    def _instagram(cls, v):
+        if v is None or not v.strip():
+            return ""
+        out = normalize_instagram(v)
+        if not out:
+            raise ValueError("Informe o link do perfil (instagram.com/...) ou o @ da empresa")
+        return out
+
+    @field_validator("segment")
+    @classmethod
+    def _segment(cls, v):
+        from .segments import all_segments
+        if v is not None and v not in {sg["key"] for sg in all_segments()}:
+            raise ValueError("Segmento desconhecido")
+        return v
+
+    @field_validator("facebook")
+    @classmethod
+    def _facebook(cls, v):
+        if v is None or not v.strip():
+            return ""
+        out = normalize_facebook(v)
+        if not out:
+            raise ValueError("Informe o link da página no Facebook (facebook.com/...)")
+        return out
 
 
 class ManualLeadIn(Strict):
     name: str = Field(min_length=1, max_length=200)
+    whatsapp: Optional[str] = Field(None, max_length=40)
+    emails: Optional[str] = Field(None, max_length=300)
+    country: Literal[tuple(COUNTRIES)] = "BR"  # type: ignore[valid-type]
     phone: Optional[str] = Field(None, max_length=40)
     website: Optional[str] = Field(None, max_length=300)
     category: Optional[str] = Field(None, max_length=120)
@@ -83,6 +126,7 @@ class AnalyzeIn(Strict):
 class MessageIn(Strict):
     variant: Optional[VariantName] = None
     use_ai: bool = False
+    channel: Optional[Literal["whatsapp", "instagram", "facebook", "email", "formulario", "ligacao"]] = None
 
 
 class StatusIn(Strict):
@@ -92,7 +136,7 @@ class StatusIn(Strict):
 
 class InteractionIn(Strict):
     type: ManualEvent
-    channel: Optional[Channel] = None
+    channel: Optional[Literal[CHANNELS + ("ligacao", "formulario")]] = None  # type: ignore[valid-type]
     summary: Optional[str] = Field(None, max_length=1000)
     message_text: Optional[str] = Field(None, max_length=2000)
     override_reason: Optional[str] = Field(None, max_length=300)
@@ -116,13 +160,18 @@ class SuppressionIn(Strict):
     kind: Literal["phone", "place_id", "domain"]
     value: str = Field(min_length=3, max_length=200)
     reason: str = Field("", max_length=300)
+    country: Literal[tuple(COUNTRIES)] = "BR"  # type: ignore[valid-type]
 
 
 class SellerIn(Strict):
     nome: str = Field(min_length=2, max_length=80)
     primeiro_nome: str = Field(min_length=2, max_length=40)
     experiencia: str = Field("", max_length=60)
+    experiencia_en: str = Field("for over 3 years", max_length=60)
     empresa: str = Field("", max_length=80)
+    whatsapp: str = Field("", max_length=40)
+    portfolio: str = Field("", max_length=200)
+    endereco: str = Field("", max_length=200)
 
 
 class ContactPolicyIn(Strict):

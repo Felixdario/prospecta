@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -31,6 +31,15 @@ CREATE TABLE IF NOT EXISTS leads (
     neighborhood TEXT,
     city TEXT,
     state TEXT,
+    country TEXT NOT NULL DEFAULT 'BR',
+    language TEXT NOT NULL DEFAULT 'pt',
+    utc_offset_minutes INTEGER,
+    whatsapp_e164 TEXT,
+    whatsapp_source TEXT,
+    whatsapp_status TEXT,
+    emails TEXT,
+    message_channel TEXT,
+    message_subject TEXT,
     phone TEXT,
     phone_e164 TEXT,
     phone_kind TEXT,
@@ -238,5 +247,25 @@ class Database:
             row = conn.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
+            else:
+                self._migrate(conn, row["version"])
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_country ON leads(country)")
         finally:
             conn.close()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection, current: int) -> None:
+        """Atualiza bancos criados por versões anteriores, sem perder dados."""
+        if current < 2:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)")}
+            for name, ddl in (("country", "TEXT NOT NULL DEFAULT 'BR'"), ("language", "TEXT NOT NULL DEFAULT 'pt'"),
+                              ("utc_offset_minutes", "INTEGER")):
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE leads ADD COLUMN {name} {ddl}")
+        if current < 3:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(leads)")}
+            for name in ("whatsapp_e164", "whatsapp_source", "whatsapp_status", "emails", "message_channel", "message_subject"):
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE leads ADD COLUMN {name} TEXT")
+        if current < SCHEMA_VERSION:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))

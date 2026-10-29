@@ -18,7 +18,7 @@ BASE_URL = "https://places.googleapis.com/v1"
 PLACE_FIELDS = [
     "id", "displayName", "formattedAddress", "addressComponents", "nationalPhoneNumber",
     "internationalPhoneNumber", "websiteUri", "googleMapsUri", "rating", "userRatingCount",
-    "regularOpeningHours", "businessStatus", "primaryType", "primaryTypeDisplayName", "types",
+    "regularOpeningHours", "businessStatus", "primaryType", "primaryTypeDisplayName", "types", "utcOffsetMinutes",
 ]
 SEARCH_FIELD_MASK = ",".join(["places." + f for f in PLACE_FIELDS] + ["nextPageToken"])
 DETAILS_FIELD_MASK = ",".join(PLACE_FIELDS)
@@ -135,6 +135,14 @@ def map_place(place: dict) -> dict:
     """Converte o formato da Places API para os campos do lead."""
     comps = place.get("addressComponents") or []
     hours = (place.get("regularOpeningHours") or {}).get("weekdayDescriptions")
+    country = (_component(comps, "country", short=True) or "").upper() or None
+    if country in (None, "BR"):
+        city = _component(comps, "administrative_area_level_2", "locality")
+        neighborhood = _component(comps, "sublocality_level_1", "sublocality", "neighborhood")
+    else:
+        # Nos EUA, administrative_area_level_2 é o condado; a cidade vem em locality.
+        city = _component(comps, "locality", "postal_town", "administrative_area_level_3", "administrative_area_level_2")
+        neighborhood = _component(comps, "neighborhood", "sublocality_level_1", "sublocality")
     return {
         "place_id": place.get("id"),
         "name": (place.get("displayName") or {}).get("text") or "(sem nome)",
@@ -142,14 +150,17 @@ def map_place(place: dict) -> dict:
         "primary_type": place.get("primaryType"),
         "types": place.get("types") or [],
         "address": place.get("formattedAddress"),
-        "neighborhood": _component(comps, "sublocality_level_1", "sublocality", "neighborhood"),
-        "city": _component(comps, "administrative_area_level_2", "locality"),
+        "neighborhood": neighborhood,
+        "city": city,
         "state": _component(comps, "administrative_area_level_1", short=True),
+        "country": country,
         "phone": place.get("nationalPhoneNumber") or place.get("internationalPhoneNumber"),
+        "phone_international": place.get("internationalPhoneNumber"),
         "website": place.get("websiteUri"),
         "maps_url": place.get("googleMapsUri"),
         "rating": place.get("rating"),
         "reviews_count": place.get("userRatingCount"),
         "opening_hours": hours,
         "business_status": place.get("businessStatus"),
+        "utc_offset_minutes": place.get("utcOffsetMinutes"),
     }

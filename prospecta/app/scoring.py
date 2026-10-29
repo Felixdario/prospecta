@@ -51,7 +51,7 @@ DEFAULT_SCORING: dict[str, Any] = {
         "poucas_avaliacoes": {"max_reviews": 4, "points": -10},
         "nota_baixa": {"max_rating": 3.5, "points": -10},
     },
-    "contact": {"telefone": 10, "celular": 5},
+    "contact": {"telefone": 10, "celular": 5, "whatsapp_publicado": 5, "email": 3, "instagram": 3},
     "segment_values": {},
 }
 
@@ -168,6 +168,13 @@ def score_lead(lead: dict, config: dict | None = None) -> dict:
                 "Formato de celular. WhatsApp não verificado", "hipotese")
     else:
         add("sem_telefone", "Sem telefone válido para contato", 0, lead.get("phone") or "Campo vazio")
+    contact_cfg = cfg["contact"]
+    if lead.get("whatsapp_e164") and contact_cfg.get("whatsapp_publicado"):
+        add("whatsapp_publicado", "WhatsApp publicado pela empresa", contact_cfg["whatsapp_publicado"], lead["whatsapp_e164"])
+    if lead.get("emails") and contact_cfg.get("email"):
+        add("email_publicado", "E-mail publicado pela empresa", contact_cfg["email"], ", ".join(lead["emails"]))
+    if (lead.get("social_links") or {}).get("Instagram") and contact_cfg.get("instagram"):
+        add("instagram", "Instagram da empresa encontrado", contact_cfg["instagram"], lead["social_links"]["Instagram"])
 
     # 4) Segmento (estimativa de benefício de um site)
     seg = get_segment(lead.get("segment"))

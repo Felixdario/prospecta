@@ -36,14 +36,15 @@ EVENT_TYPES = {
     "coleta": "Coleta de dados",
     "atualizacao_dados": "Atualização de dados",
     "consentimento": "Consentimento",
+    "sem_whatsapp": "Número sem WhatsApp",
 }
-MANUAL_EVENT_TYPES = ("mensagem_enviada", "resposta_recebida", "ligacao", "reuniao", "proposta", "nota", "opt_out")
-CHANNELS = ("whatsapp", "telefone", "email", "presencial", "instagram", "outro")
+MANUAL_EVENT_TYPES = ("mensagem_enviada", "resposta_recebida", "ligacao", "reuniao", "proposta", "nota", "opt_out", "sem_whatsapp")
+CHANNELS = ("whatsapp", "telefone", "email", "formulario_site", "instagram", "facebook", "presencial", "outro")
 
 DEFAULT_CONTACT_POLICY = {
     "daily_limit": 20,
     "min_days_between_contacts": 3,
-    "max_unanswered_attempts": 2,
+    "max_unanswered_attempts": 3,  # 1ª mensagem + follow-up + encerramento
     "business_hours": [8, 19],
     "business_days": [0, 1, 2, 3, 4, 5],  # segunda (0) a sábado (5)
 }
@@ -95,8 +96,10 @@ def contact_check(lead: dict, stats: dict, suppressed: list[dict], sent_today: i
         blockers.append(f"Na lista de supressão ({s['kind']}: {s['value']}){' — ' + s['reason'] if s.get('reason') else ''}.")
     if lead.get("source") == "demo":
         blockers.append("Lead fictício de demonstração: envio desativado.")
-    if not lead.get("phone_e164"):
-        blockers.append("Sem telefone válido para contato por WhatsApp.")
+    has_instagram = bool((lead.get("social_links") or {}).get("Instagram") or (lead.get("social_links") or {}).get("Facebook"))
+    has_form = bool(((lead.get("site_analysis") or {}).get("signals") or {}).get("formulario"))
+    if not (lead.get("phone_e164") or lead.get("whatsapp_e164") or lead.get("emails") or has_instagram or has_form):
+        blockers.append("Sem nenhum canal de contato (telefone, WhatsApp, e-mail, Instagram ou formulário).")
     if lead.get("status") in ("sem_interesse", "convertido"):
         blockers.append(f"Lead com status '{STATUSES[lead['status']]}': não é caso de prospecção.")
     if sent_today >= p["daily_limit"]:
@@ -110,12 +113,34 @@ def contact_check(lead: dict, stats: dict, suppressed: list[dict], sent_today: i
         blockers.append(f"Já foram {stats['unanswered_attempts']} mensagens sem resposta (máximo {p['max_unanswered_attempts']}). Não insista.")
     if phone_recent_other_leads:
         blockers.append("Este telefone já foi contatado recentemente por outro cadastro (possível duplicata).")
-    local = now.astimezone(ZoneInfo(tz))
+    country = (lead.get("country") or "BR").upper()
+    offset = lead.get("utc_offset_minutes")
     start, end = p["business_hours"]
-    if local.weekday() not in p["business_days"] or not (start <= local.hour < end):
-        warnings.append(f"Fora do horário comercial configurado ({start}h–{end}h). Considere enviar mais tarde.")
-    if lead.get("phone_kind") == "fixo":
-        warnings.append("Número fixo: pode não ter WhatsApp. Se não abrir, considere ligar.")
+    if offset is not None or country == "BR":
+        local = now.astimezone(timezone(timedelta(minutes=int(offset))) if offset is not None else ZoneInfo(tz))
+        where = "da empresa" if country != "BR" else "configurado"
+        if local.weekday() not in p["business_days"] or not (start <= local.hour < end):
+            warnings.append(f"Fora do horário comercial {where} ({start}h–{end}h; agora são {local:%H:%M} lá). Considere contatar mais tarde.")
+        elif country != "BR":
+            warnings.append(f"Horário local da empresa agora: {local:%H:%M}.")
+    else:
+        warnings.append("Fuso horário da empresa desconhecido: confira o horário local antes de ligar.")
+    channel = lead.get("message_channel")
+    if country in ("US", "CA") and channel == "email":
+        warnings.append("EUA: e-mail comercial precisa do seu endereço postal, de deixar claro que é uma oferta e de um jeito de "
+                        "descadastrar (CAN-SPAM). A mensagem já traz isso; confira o endereço em Configurações."
+                        if country == "US" else
+                        "Canadá (CASL): só envie se a empresa publicou o e-mail sem aviso contra ofertas ou te deu permissão.")
+    elif country in ("US", "CA"):
+        warnings.append("EUA/Canadá: WhatsApp é pouco usado e mensagens de texto de marketing para celular podem exigir "
+                        "consentimento prévio (TCPA nos EUA, CASL no Canadá). Prefira ligar ou usar o formulário do site.")
+    elif country != "BR":
+        warnings.append("Fora do Brasil: confira as regras locais de contato comercial (ex.: PECR no Reino Unido, Spam Act na Austrália).")
+    if (lead.get("phone_kind") == "fixo" and not lead.get("whatsapp_e164") and lead.get("whatsapp_status") != "sem_whatsapp"
+            and lead.get("message_channel") in (None, "whatsapp")):
+        warnings.append("Número fixo: pode não ter WhatsApp. Se não abrir, marque \"Não tem WhatsApp\" e tente outro canal.")
+    if ((lead.get("site_analysis") or {}).get("contacts") or {}).get("sem_ofertas"):
+        warnings.append("O site da empresa diz que não quer receber ofertas. Os e-mails de lá não foram guardados; pense bem antes de contatar.")
     if lead.get("consent_status") != "opt_in":
         warnings.append("Sem consentimento prévio registrado: faça um contato individual, sem envio em massa, e respeite pedidos de parada.")
     return {"allowed": not blockers, "blockers": blockers, "warnings": warnings, "sent_today": sent_today, "daily_limit": p["daily_limit"]}
@@ -135,15 +160,26 @@ def next_action(lead: dict, stats: dict, open_tasks: list[dict], policy: dict, t
     if status == "qualificado":
         if lead.get("priority") == "baixa":
             return "Baixa prioridade: revisar só se houver tempo"
+        if (lead.get("country") or "BR").upper() in ("US", "CA"):
+            return "Gerar o roteiro de ligação"
         return "Gerar a mensagem personalizada"
     if status == "aguardando_revisao":
-        return "Revisar a mensagem e enviar pelo WhatsApp"
+        channel = lead.get("message_channel")
+        if lead.get("message_variant") == "roteiro_ligacao" or channel == "ligacao" or (
+                not channel and (lead.get("country") or "BR").upper() in ("US", "CA")):
+            return "Revisar o roteiro e ligar"
+        where = {"instagram": "pelo Direct do Instagram", "facebook": "pelo Messenger do Facebook", "email": "por e-mail",
+                 "formulario": "pelo formulário do site"}.get(
+            channel or "", "pelo WhatsApp")
+        return f"Revisar a mensagem e enviar {where}"
     if status == "contato_realizado":
         last_out = _parse(stats.get("last_outbound_at"))
         if stats.get("unanswered_attempts", 0) >= p["max_unanswered_attempts"]:
             return "Sem resposta após as tentativas: encerrar como 'Sem interesse'"
         if last_out and now - last_out >= timedelta(days=p["min_days_between_contacts"]):
-            return "Enviar um único follow-up educado"
+            if stats.get("unanswered_attempts", 0) >= max(2, p["max_unanswered_attempts"] - 1):
+                return "Enviar a mensagem de encerramento (último contato)"
+            return "Enviar o follow-up com uma proposta concreta"
         if last_out:
             when = (last_out + timedelta(days=p["min_days_between_contacts"])).astimezone(ZoneInfo(tz)).strftime("%d/%m")
             return f"Aguardar resposta (follow-up possível a partir de {when})"

@@ -96,6 +96,10 @@ DEMO = [
     {"name": "Salão Beleza Ilustrativa (DEMO)", "category": "Salão de beleza", "segment": "beleza", "neighborhood": "Água Verde", "rating": 4.4, "reviews_count": 35, "phone": "(41) 90000-0004", "website": "http://salao-demo.example"},
     {"name": "Restaurante Sabor Teste (DEMO)", "category": "Restaurante", "segment": "alimentacao", "neighborhood": "Mercês", "rating": 4.2, "reviews_count": 640, "phone": "(41) 90000-0005", "website": "https://restaurante-demo.example"},
     {"name": "Escritório Contábil Amostra (DEMO)", "category": "Contabilidade", "segment": "profissionais", "neighborhood": "Centro Cívico", "rating": 5.0, "reviews_count": 3, "phone": None, "website": None},
+    {"name": "Lone Star Roofing Example (DEMO)", "category": "Roofing contractor", "segment": "servicos", "neighborhood": "South Austin", "rating": 4.9, "reviews_count": 187,
+     "phone": "(512) 555-0142", "website": "https://www.facebook.com/lonestar-roofing-demo", "city": "Austin", "state": "TX", "country": "US", "utc_offset_minutes": -300},
+    {"name": "Sunrise Dental Sample (DEMO)", "category": "Dentist", "segment": "saude", "neighborhood": "Downtown", "rating": 4.7, "reviews_count": 96,
+     "phone": "(512) 555-0199", "website": None, "city": "Austin", "state": "TX", "country": "US", "utc_offset_minutes": -300},
 ]
 DEMO_SITES = {
     "http://salao-demo.example": {"kind": "proprio", "kind_label": "Site próprio", "platform": None, "fetched": True, "reachable": True,
@@ -116,7 +120,10 @@ def cmd_seed_demo(args) -> None:
 
     svc = build_services(load_config())
     for d in DEMO:
-        data = dict(d, city="Curitiba", state="PR", address=f"Rua Fictícia, 100 - {d['neighborhood']}, Curitiba - PR")
+        if d.get("country") == "US":
+            data = dict(d, address=f"100 Example St, {d['city']}, {d['state']} 78701, USA")
+        else:
+            data = dict(d, city="Curitiba", state="PR", address=f"Rua Fictícia, 100 - {d['neighborhood']}, Curitiba - PR")
         lead_id, new = svc.repo.upsert_lead(data, "demo", "cli")
         site = DEMO_SITES.get(d["website"] or "") or analyze_website(d["website"], None)
         site["checked_at"] = utcnow()

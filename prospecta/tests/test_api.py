@@ -149,7 +149,8 @@ class ApiFlowTests(unittest.TestCase):
         text = r.content.decode("utf-8-sig")
         rows = list(csv.reader(io.StringIO(text), delimiter=";"))
         self.assertEqual(rows[0][:3], ["id", "empresa", "categoria"])
-        self.assertTrue(all(row[16] == "alta" for row in rows[1:]))
+        col = rows[0].index("prioridade")
+        self.assertTrue(all(row[col] == "alta" for row in rows[1:]))
         # Importação de planilha (formato do google-maps-scraper-kit)
         kit = "title,phone,website,category,address,review_rating,review_count\nBarbearia Kit,(41) 98888-1111,,Barbearia,Curitiba,4.9,120\nAcademia Teste 1,(41) 99999-0001,,Academia,Curitiba,4.7,150\n"
         r = self.client.post("/api/import", files={"file": ("leads.csv", kit.encode(), "text/csv")}, headers=H)

@@ -131,12 +131,47 @@ class ScoringTests(unittest.TestCase):
 class MessageTests(unittest.TestCase):
     def test_no_site_message_is_clean_and_personal(self):
         msg = render_template(lead(), "sem_site", SELLER, now=datetime(2026, 10, 26, 14, 0))
-        self.assertTrue(msg.startswith("Boa tarde, tudo bem? Meu nome é Eduardo"))
-        self.assertIn("Academia Teste", msg)
-        self.assertIn("nota 4,8 com 212 avaliações", msg)
+        # Começa pela empresa (não por "Meu nome é"), é curta e termina com pergunta de interesse
+        self.assertTrue(msg.startswith("Oi, tudo bem? Vi a Academia Teste no Google: nota 4,8 com 212 avaliações"), msg)
+        self.assertIn("Sou o Eduardo", msg)
         self.assertIn("planos, horários e modalidades", msg)
-        self.assertIn("sem compromisso", msg)
-        self.assertEqual(lint_message(msg, lead()), [])
+        self.assertTrue(msg.rstrip().endswith("Sem compromisso."))
+        self.assertLess(len(msg), 400)
+        self.assertEqual(lint_message(msg, lead(), "whatsapp", "sem_site"), [])
+
+    def test_email_format_has_subject_signature_and_opt_out(self):
+        from app.messages import render_subject
+        seller = dict(SELLER, whatsapp="(41) 99999-0000", portfolio="https://exemplo.dev")
+        msg = render_template(lead(), "sem_site", seller, channel="email")
+        self.assertIn("\n\nEduardo Felix\nWhatsApp: (41) 99999-0000\nTrabalhos: https://exemplo.dev", msg)
+        self.assertIn("responder \"não\"", msg)
+        self.assertEqual(render_subject(lead(), "sem_site"), "Site para a Academia Teste")
+        self.assertEqual(render_subject(lead(), "follow_up"), "Re: Site para a Academia Teste")
+        self.assertEqual(lint_message(msg, lead(), "email", "sem_site"), [])
+        no_optout = msg.split("\n\nSe não quiser")[0]
+        self.assertTrue(any("não receber mais" in w["motivo"] for w in lint_message(no_optout, lead(), "email", "sem_site")))
+
+    def test_articles_and_behavioral_lint(self):
+        from app.messages import _articles
+        self.assertEqual(_articles("Restaurante Sabor")["pela"], "pelo")
+        self.assertEqual(_articles("Barbearia X")["da"], "da")
+        self.assertIsNone(_articles("Corte & Cia"))
+        msg = render_template(lead(name="Restaurante Sabor"), "abertura_curta", SELLER)
+        self.assertIn("responsável pelo Restaurante Sabor?", msg)
+        self.assertLess(len(msg), 220)
+        warn = lint_message("Boa tarde, tudo bem? Meu nome é Eduardo e vendo sites. Veja https://x.com", lead(), "whatsapp", "sem_site")
+        motivos = " ".join(w["motivo"] for w in warn)
+        self.assertIn("Comece falando da empresa", motivos)
+        self.assertIn("Link na primeira mensagem", motivos)
+
+    def test_follow_up_sequence(self):
+        from app.messages import choose_variant
+        self.assertEqual(choose_variant(lead(status="contato_realizado", contact_count=1)), "follow_up")
+        self.assertEqual(choose_variant(lead(status="contato_realizado", contact_count=2)), "follow_up_final")
+        fu = render_template(lead(), "follow_up", SELLER)
+        self.assertIn("Quer que eu te mande um exemplo?", fu)
+        self.assertIn("sem problema", fu)
+        self.assertIn("Vou parar de mandar mensagem", render_template(lead(), "follow_up_final", SELLER))
 
     def test_all_variants_pass_lint(self):
         cases = [lead(), lead(site_analysis={"kind": "rede_social", "platform": "Instagram", "issues": []}, website="https://instagram.com/x"),
@@ -157,9 +192,8 @@ class MessageTests(unittest.TestCase):
         self.assertTrue(variant_incompatibility(site, "presenca_limitada"))
         self.assertTrue(variant_incompatibility(site, "site_desatualizado"))
         self.assertIsNone(variant_incompatibility(site, "site_existente"))
-        # Mesmo forçando o texto, o verificador barra "não encontrei site" para quem tem site
-        msg = render_template(site, "sem_site", SELLER)
-        self.assertTrue([w for w in lint_message(msg, site) if w["nivel"] == "bloqueante"])
+        # Mesmo se alguém escrever, o verificador barra "não encontrei site" para quem tem site
+        self.assertTrue([w for w in lint_message("Reparei que vocês ainda não têm um site próprio.", site) if w["nivel"] == "bloqueante"])
 
     def test_lint_catches_bad_claims(self):
         site_lead = lead(website="http://x.com.br", site_analysis={"kind": "proprio", "issues": []})
@@ -173,9 +207,10 @@ class MessageTests(unittest.TestCase):
         self.assertEqual(choose_variant(lead(site_analysis={"kind": "desconhecido", "issues": []})), "responsavel_nao_identificado")
         self.assertEqual(choose_variant(lead(status="nao_contatar")), "opt_out")
         msg = render_template(lead(preview_ready=True, preview_url="https://previa.exemplo/academia"), "sem_site", SELLER)
-        self.assertIn("preparei uma prévia", msg)
-        self.assertIn("https://previa.exemplo/academia", msg)
-        self.assertNotIn("preparei", render_template(lead(), "sem_site", SELLER))
+        self.assertIn("Montei uma prévia", msg)
+        self.assertIn("Posso te mandar o link?", msg)
+        self.assertNotIn("https://", msg)  # o link só vai depois que a pessoa aceitar
+        self.assertNotIn("prévia", render_template(lead(), "sem_site", SELLER))
 
     def test_analysis_separates_facts_and_hypotheses(self):
         a = build_analysis(lead())
@@ -205,13 +240,17 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(r["allowed"])
         self.assertIn("menos de 3 dias", r["blockers"][0])
         two = contact_stats([self.ev("mensagem_enviada", 10), self.ev("mensagem_enviada", 5)])
-        self.assertFalse(contact_check(lead(status="contato_realizado"), two, [], 0, {}, now=NOW)["allowed"])
+        self.assertTrue(contact_check(lead(status="contato_realizado"), two, [], 0, {}, now=NOW)["allowed"])  # ainda cabe o encerramento
+        three = contact_stats([self.ev("mensagem_enviada", 15), self.ev("mensagem_enviada", 10), self.ev("mensagem_enviada", 5)])
+        self.assertFalse(contact_check(lead(status="contato_realizado"), three, [], 0, {}, now=NOW)["allowed"])
+        only_email = lead(phone_e164=None, emails=["contato@a.com"])
+        self.assertTrue(contact_check(only_email, contact_stats([]), [], 0, {}, now=NOW)["allowed"])
         replied = contact_stats([self.ev("mensagem_enviada", 10), self.ev("mensagem_enviada", 5), self.ev("resposta_recebida", 4)])
         self.assertTrue(contact_check(lead(status="respondeu"), replied, [], 0, {}, now=NOW)["allowed"])
 
     def test_next_action(self):
         stats = contact_stats([self.ev("mensagem_enviada", 4)])
-        self.assertEqual(next_action(lead(status="contato_realizado"), stats, [], {}, now=NOW), "Enviar um único follow-up educado")
+        self.assertEqual(next_action(lead(status="contato_realizado"), stats, [], {}, now=NOW), "Enviar o follow-up com uma proposta concreta")
         self.assertIn("Tarefa", next_action(lead(), {}, [{"title": "Ligar", "due_date": "2026-10-30"}], {}, now=NOW))
 
 
@@ -221,7 +260,7 @@ class CsvTests(unittest.TestCase):
         rows, errors = parse_csv(kit)
         self.assertEqual(errors, [])
         self.assertEqual(rows[0]["name"], "Academia X")
-        self.assertNotIn("emails", rows[0])
+        self.assertEqual(rows[0]["emails"], "a@b.com")
         self.assertTrue(rows[0]["has_website_column"])
         pt = "nome;telefone;cidade;nota\nSalão Y;(41) 3333-4444;Curitiba;4,5\n;;;\n".encode("cp1252")
         rows, errors = parse_csv(pt)

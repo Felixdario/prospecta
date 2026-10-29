@@ -13,7 +13,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from .db import utcnow
-from .phones import normalize_br_phone
+from .countries import build_query, get_country
+from .phones import normalize_phone
 from .services import Services, should_auto_message
 from .site_analysis import classify_url
 from .sources.places import PlacesError, QuotaExceeded, map_place
@@ -28,17 +29,14 @@ class Cancelled(Exception):
 
 
 def build_queries(params: dict) -> list[str]:
-    segment = params["segment"].strip()
-    city = params["city"].strip()
-    state = (params.get("state") or "").strip()
-    place = f"{city} - {state}" if state else city
+    country = params.get("country") or "BR"
     regions = [r.strip() for r in params.get("regions") or [] if r.strip()]
     if regions:
-        return [f"{segment} em {r}, {place}" for r in regions]
-    return [f"{segment} em {place}"]
+        return [build_query(params["segment"], params["city"], params.get("state"), r, country) for r in regions]
+    return [build_query(params["segment"], params["city"], params.get("state"), None, country)]
 
 
-def discard_reason(data: dict, filters: dict) -> str | None:
+def discard_reason(data: dict, filters: dict, country: str = "BR") -> str | None:
     """Aplica os filtros de qualificação ao resultado bruto. Retorna o motivo do descarte ou None."""
     if (data.get("business_status") or "OPERATIONAL") != "OPERATIONAL":
         return "fechada"
@@ -57,10 +55,13 @@ def discard_reason(data: dict, filters: dict) -> str | None:
         return "poucas_avaliacoes"
     if filters.get("max_reviews") and reviews > int(filters["max_reviews"]):
         return "avaliacoes_acima_do_maximo"
-    phone = normalize_br_phone(data.get("phone"))
+    phone = normalize_phone(data.get("phone"), data.get("country") or country, data.get("phone_international"))
     if filters.get("require_phone") and not (phone and phone.e164):
         return "sem_telefone"
-    if filters.get("only_mobile") and not (phone and phone.kind == "celular"):
+    # Nos EUA/Canadá não dá para saber pelo número se é celular: o filtro só vale onde é possível identificar.
+    if filters.get("only_mobile") and phone and phone.kind != "indefinido" and phone.kind != "celular":
+        return "telefone_nao_celular"
+    if filters.get("only_mobile") and not phone:
         return "telefone_nao_celular"
     return None
 
@@ -112,7 +113,7 @@ class Worker:
         if self.repo.job_cancel_requested(job_id):
             raise Cancelled()
 
-    def _analyze_many(self, job: dict, lead_ids: list[int], use_ai: bool, started_label: str) -> int:
+    def _analyze_many(self, job: dict, lead_ids: list[int], use_ai: bool, started_label: str, force_refresh: bool = False) -> int:
         settings = self.repo.settings()
         min_priority = settings["pipeline"].get("auto_message_min_priority", "alta")
         high = 0
@@ -123,7 +124,7 @@ class Worker:
             try:
                 lead = self.repo.get_lead(lead_id)
                 analyzed = lead.get("site_analyzed_at")
-                refresh = bool(analyzed) and datetime.fromisoformat(analyzed) < week_ago
+                refresh = force_refresh or (bool(analyzed) and datetime.fromisoformat(analyzed) < week_ago)
                 lead = self.services.analyze(lead_id, job["actor"], use_ai=False, refresh_site=refresh)
                 if lead["priority"] == "alta":
                     high += 1
@@ -141,6 +142,7 @@ class Worker:
         queries = build_queries(p)
         per_query = min(60, max_total)
         places = self.services.places()
+        country = get_country(p.get("country"))
         reasons: Counter = Counter()
         saved_ids: list[int] = []
         found = new = updated = 0
@@ -150,19 +152,23 @@ class Worker:
                 break
             self.repo.update_job(job["id"], stage=f"Buscando no Google: \"{query}\" ({qi}/{len(queries)})", api_calls=places.calls)
             try:
-                for place in places.search_text(query, per_query, filters.get("min_rating") or None):
+                for place in places.search_text(query, per_query, filters.get("min_rating") or None,
+                                                language=country.places_language, region=country.code):
                     self._check_cancel(job["id"])
                     found += 1
                     data = map_place(place)
-                    reason = discard_reason(data, filters)
+                    data["country"] = data.get("country") or country.code
+                    reason = discard_reason(data, filters, country.code)
+                    if not reason and data["country"] != country.code:
+                        reason = "fora_do_pais"
                     if not reason:
-                        phone = normalize_br_phone(data.get("phone"))
+                        phone = normalize_phone(data.get("phone"), data["country"], data.get("phone_international"))
                         if self.repo.suppression_matches({"place_id": data.get("place_id"), "phone_e164": phone.e164 if phone else None, "website": data.get("website")}):
                             reason = "lista_de_supressao"
                     if reason:
                         reasons[reason] += 1
                         continue
-                    lead_id, is_new = self.services.save_place(place, job["actor"], job["id"], p["segment"])
+                    lead_id, is_new = self.services.save_place(place, job["actor"], job["id"], p["segment"], country.code, p.get("segment_group"))
                     if lead_id in saved_ids:
                         continue
                     self.repo.link_search_result(job["id"], lead_id, is_new)
@@ -192,6 +198,7 @@ class Worker:
 
     def run_analysis(self, job: dict) -> None:
         ids = [int(i) for i in job["params"].get("lead_ids", [])]
-        high = self._analyze_many(job, ids, bool(job["params"].get("use_ai")), "Analisando")
+        high = self._analyze_many(job, ids, bool(job["params"].get("use_ai")), "Analisando",
+                                  force_refresh=bool(job["params"].get("refresh_site")))
         self.repo.update_job(job["id"], status="concluida", stage="Concluída", high_priority=high, saved_new=0,
                              updated=len(ids), found=len(ids), finished_at=utcnow())

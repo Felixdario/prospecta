@@ -17,6 +17,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from .countries import all_countries
+from .segment_catalog import catalog_for_api
 from .messages import VARIANTS
 from .pipeline import CHANNELS, EVENT_TYPES, MANUAL_EVENT_TYPES, PRIORITIES, STATUSES
 from .repository import NotFound
@@ -182,7 +184,7 @@ def meta(ctx: Ctx):
     return {
         "statuses": STATUSES, "priorities": PRIORITIES, "variants": VARIANTS, "event_types": EVENT_TYPES,
         "manual_event_types": list(MANUAL_EVENT_TYPES), "channels": list(CHANNELS), "segments": all_segments(),
-        "presence_kinds": KIND_LABELS,
+        "presence_kinds": KIND_LABELS, "countries": all_countries(), "segment_catalog": catalog_for_api(),
         "google_configurado": cfg.has_google, "ia_configurada": cfg.has_ai, "modelo_ia": cfg.ai_model if cfg.has_ai else None,
         "uso_google_mes": ctx.svc.repo.usage(),
         "limites_google": {"text_search_enterprise": cfg.google_textsearch_monthly_limit, "place_details_enterprise": cfg.google_details_monthly_limit},
@@ -227,7 +229,7 @@ def cancel_search(ctx: Ctx):
     return ctx.svc.repo.get_job(job["id"])
 
 
-LIST_FILTERS = ("q", "status", "priority", "segment", "source", "presence", "city", "min_score", "has_phone", "search_id", "sort", "page", "page_size")
+LIST_FILTERS = ("q", "status", "priority", "segment", "source", "presence", "country", "city", "min_score", "has_phone", "search_id", "sort", "page", "page_size")
 
 
 def list_leads(ctx: Ctx):
@@ -261,7 +263,7 @@ def patch_lead(ctx: Ctx):
     if fields:
         changed = ", ".join(sorted(fields))
         ctx.svc.repo.add_event(lead_id, ctx.actor, "nota", f"Dados editados: {changed}")
-    if {"website", "phone", "segment"} & set(fields):
+    if {"website", "phone", "segment", "whatsapp", "emails", "instagram", "facebook"} & set(fields):
         ctx.svc.analyze(lead_id, ctx.actor)
     return ctx.svc.lead_detail(lead_id)
 
@@ -293,7 +295,7 @@ def score_lead_view(ctx: Ctx):
 def generate_message(ctx: Ctx):
     data = MessageIn.model_validate(ctx.body or {})
     lead_id = ctx.path_int("lead_id")
-    result = ctx.svc.generate_message(lead_id, ctx.actor, data.variant, data.use_ai)
+    result = ctx.svc.generate_message(lead_id, ctx.actor, data.variant, data.use_ai, data.channel)
     return {**result, **ctx.svc.lead_detail(lead_id)}
 
 
@@ -351,7 +353,8 @@ def patch_task(ctx: Ctx):
 
 EXPORT_COLUMNS = [
     ("id", "id"), ("empresa", "name"), ("categoria", "category"), ("segmento", "segment"), ("endereco", "address"),
-    ("bairro", "neighborhood"), ("cidade", "city"), ("uf", "state"), ("telefone", "phone"), ("tipo_telefone", "phone_kind"),
+    ("bairro", "neighborhood"), ("cidade", "city"), ("uf", "state"), ("pais", "country"), ("idioma", "language"),
+    ("telefone", "phone"), ("telefone_internacional", "phone_e164"), ("tipo_telefone", "phone_kind"),
     ("site", "website"), ("presenca_digital", "presence_kind"), ("link_google_maps", "maps_url"), ("nota", "rating"),
     ("avaliacoes", "reviews_count"), ("pontuacao", "score"), ("prioridade", "priority"), ("justificativa", None),
     ("status", "status"), ("consentimento", "consent_status"), ("ultimo_contato", "last_contact_at"),
@@ -400,7 +403,7 @@ def list_suppression(ctx: Ctx):
 
 def add_suppression(ctx: Ctx):
     data = SuppressionIn.model_validate(ctx.body or {})
-    ctx.svc.repo.add_suppression(data.kind, data.value, data.reason, ctx.actor)
+    ctx.svc.repo.add_suppression(data.kind, data.value, data.reason, ctx.actor, data.country)
     return JSONResponse({"ok": True}, status_code=201)
 
 
@@ -427,6 +430,22 @@ def put_settings(ctx: Ctx):
         ctx.svc.repo.save_setting("scoring", validate_scoring(data.scoring))
         ctx.svc.rescore_all(ctx.actor)
     return get_settings(ctx)
+
+
+def insights(ctx: Ctx):
+    from .insights import compute
+
+    return compute(ctx.svc.repo.outreach_events())
+
+
+def reanalyze_all(ctx: Ctx):
+    """Refaz o diagnóstico e a busca de contatos de todos os leads em andamento (fila em segundo plano)."""
+    items = ctx.svc.repo.iter_leads_for_export({})
+    ids = [l["id"] for l in items if l["status"] not in ("nao_contatar", "convertido", "sem_interesse")]
+    if not ids:
+        raise ApiError(400, "Nenhum lead para analisar.")
+    job_id = ctx.svc.repo.create_job({"kind": "analise", "lead_ids": ids, "refresh_site": True, "origem": "reanalise"}, ctx.actor)
+    return JSONResponse(ctx.svc.repo.get_job(job_id), status_code=202)
 
 
 def audit_log(ctx: Ctx):
@@ -476,6 +495,8 @@ def routes() -> list[Route]:
         Route("/api/settings", E("leads:read", get_settings), methods=["GET"]),
         Route("/api/settings", E(ADMIN, put_settings), methods=["PUT"]),
         Route("/api/audit", E(ADMIN, audit_log), methods=["GET"]),
+        Route("/api/insights", E("leads:read", insights), methods=["GET"]),
+        Route("/api/maintenance/reanalyze", E(ADMIN, reanalyze_all), methods=["POST"]),
         Route("/api/maintenance/google-cache", E(ADMIN, google_cache), methods=["POST"]),
         Route("/api/tokens", E(ADMIN, list_tokens), methods=["GET"]),
     ]

@@ -16,7 +16,7 @@ herda as mesmas proteções do painel: escopos, validação de entrada, limite d
 
 | Ferramenta | O que faz | Escopo exigido |
 |---|---|---|
-| `search_companies` | Pesquisa no Google (gasta cota), filtra, salva, analisa e devolve os leads por pontuação | `search:run` |
+| `search_companies` | Pesquisa no Google (gasta cota), filtra, salva, analisa e devolve os leads por pontuação. Aceita `country` (BR, US, CA, GB, AU) | `search:run` |
 | `get_search_status` | Andamento de uma pesquisa | `leads:read` |
 | `list_leads` | Lista com filtros (prioridade, status, presença, cidade, nota mínima) | `leads:read` |
 | `get_company_details` | Dados, diagnóstico do site, pontuação explicada, fatos x hipóteses, política de contato, histórico | `leads:read` |
@@ -84,6 +84,7 @@ Exemplos de pedidos:
 
 - "Pesquise 20 academias sem site próprio no Batel e no Água Verde, em Curitiba, e me mostre as 5 melhores."
 - "Abra a Academia X, explique a pontuação e escreva um rascunho de mensagem."
+- "Pesquise 20 dentistas sem site em Austin, Texas (EUA) e prepare o roteiro de ligação do melhor."
 - "Quais tarefas de follow-up vencem hoje?"
 - "A Clínica Y respondeu pedindo orçamento: registre e crie uma tarefa para sexta."
 

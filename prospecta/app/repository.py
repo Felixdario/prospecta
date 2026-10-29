@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 import hmac
 import secrets
 import sqlite3
@@ -11,18 +12,21 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .db import Database, dumps, loads, utcnow
-from .phones import normalize_br_phone
+from .phones import normalize_phone
 from .pipeline import DEFAULT_CONTACT_POLICY
 from .site_analysis import classify_url
 
-JSON_FIELDS = ("opening_hours", "social_links", "site_analysis", "score_breakdown", "analysis", "message_warnings")
+JSON_FIELDS = ("opening_hours", "social_links", "site_analysis", "score_breakdown", "analysis", "message_warnings", "emails")
 GOOGLE_FIELDS = ("name", "category", "primary_type", "address", "neighborhood", "city", "state", "phone", "phone_e164",
-                 "phone_kind", "website", "maps_url", "rating", "reviews_count", "opening_hours", "business_status")
+                 "phone_kind", "website", "maps_url", "rating", "reviews_count", "opening_hours", "business_status",
+                 "utc_offset_minutes")
 EDITABLE_FIELDS = ("name", "category", "segment", "address", "neighborhood", "city", "state", "phone", "website",
-                   "notes", "responsible_name", "preview_ready", "preview_url", "suggested_message")
+                   "notes", "responsible_name", "preview_ready", "preview_url", "suggested_message", "language", "country",
+                   "whatsapp", "emails", "message_subject", "message_channel", "instagram", "facebook")
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "seller": {"nome": "Eduardo Felix", "primeiro_nome": "Eduardo", "experiencia": "há mais de 3 anos", "empresa": ""},
+    "seller": {"nome": "Eduardo Felix", "primeiro_nome": "Eduardo", "experiencia": "há mais de 3 anos",
+               "experiencia_en": "for over 3 years", "empresa": "", "whatsapp": "", "portfolio": "", "endereco": ""},
     "contact_policy": dict(DEFAULT_CONTACT_POLICY),
     "pipeline": {"auto_message_min_priority": "alta", "analyze_sites": True},
     "scoring": {},
@@ -44,6 +48,22 @@ def lead_from_row(row: sqlite3.Row | None) -> dict | None:
     d["preview_ready"] = bool(d.get("preview_ready"))
     d["google_content_purged"] = bool(d.get("google_content_purged"))
     return d
+
+
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def clean_emails(value) -> list[str]:
+    """Aceita lista ou texto separado por vírgula/ponto e vírgula; devolve e-mails válidos, sem repetir."""
+    if not value:
+        return []
+    items = value if isinstance(value, (list, tuple)) else re.split(r"[,;\s]+", str(value))
+    out: list[str] = []
+    for e in items:
+        e = str(e).strip().strip(".").lower()
+        if EMAIL_RE.match(e) and e not in out:
+            out.append(e)
+    return out[:5]
 
 
 def hash_token(token: str) -> str:
@@ -80,14 +100,28 @@ class Repo:
         """Insere ou atualiza um lead, evitando duplicatas por place_id, telefone ou nome+cidade.
         Nunca altera status, histórico ou anotações de um lead existente."""
         now = utcnow()
-        data = {k: v for k, v in data.items() if k in GOOGLE_FIELDS + ("place_id", "segment")}
-        phone = normalize_br_phone(data.get("phone"))
+        intl = data.get("phone_international")
+        whatsapp_raw = data.get("whatsapp")
+        emails = clean_emails(data.get("emails"))
+        data = {k: v for k, v in data.items() if k in GOOGLE_FIELDS + ("place_id", "segment", "country", "language")}
+        country = (data.get("country") or "BR").upper()
+        data["country"] = country
+        if not data.get("language"):
+            from .countries import get_country
+            data["language"] = get_country(country).message_language
+        phone = normalize_phone(data.get("phone"), country, intl)
         if phone:
             data["phone"] = phone.display()
             data["phone_e164"] = phone.e164
             data["phone_kind"] = phone.kind
         if "opening_hours" in data:
             data["opening_hours"] = dumps(data["opening_hours"])
+        if whatsapp_raw:
+            wa = normalize_phone(whatsapp_raw, country)
+            if wa and wa.e164:
+                data["whatsapp_e164"], data["whatsapp_source"] = wa.e164, "planilha" if source == "csv_importacao" else "cadastro"
+        if emails:
+            data["emails"] = dumps(emails)
         with self.db.tx() as conn:
             existing = self._find_existing(conn, data)
             if existing:
@@ -98,6 +132,7 @@ class Repo:
                     updates.update({"site_analysis": None, "site_analyzed_at": None, "presence_kind": None})
                 if existing["segment"]:
                     updates.pop("segment", None)
+                updates.pop("language", None)  # preferência do usuário: não sobrescrever
                 updates["last_seen_at"] = now
                 updates["updated_at"] = now
                 if source == "google_places":
@@ -139,16 +174,49 @@ class Repo:
         if not fields:
             return
         fields = dict(fields)
+        if "instagram" in fields or "facebook" in fields:
+            with self.db.read() as conn:
+                row = conn.execute("SELECT social_links FROM leads WHERE id = ?", (lead_id,)).fetchone()
+            links = (loads(row["social_links"]) if row else None) or {}
+            for field, key in (("instagram", "Instagram"), ("facebook", "Facebook")):
+                if field in fields:
+                    value = fields.pop(field) or None
+                    if value:
+                        links[key] = value
+                    else:
+                        links.pop(key, None)
+            fields["social_links"] = links or None
+        if "emails" in fields:
+            value = fields["emails"]
+            if isinstance(value, str) and value.strip().startswith("["):
+                value = loads(value, [])
+            fields["emails"] = clean_emails(value) or None
         for f in JSON_FIELDS:
             if f in fields and not isinstance(fields[f], str):
                 fields[f] = dumps(fields[f])
         if "preview_ready" in fields:
             fields["preview_ready"] = 1 if fields["preview_ready"] else 0
         if "phone" in fields:
-            phone = normalize_br_phone(fields["phone"])
+            country = fields.get("country")
+            if not country:
+                with self.db.read() as conn:
+                    row = conn.execute("SELECT country FROM leads WHERE id = ?", (lead_id,)).fetchone()
+                country = row["country"] if row else "BR"
+            phone = normalize_phone(fields["phone"], country)
             fields["phone"] = phone.display() if phone else None
             fields["phone_e164"] = phone.e164 if phone else None
             fields["phone_kind"] = phone.kind if phone else None
+        if "whatsapp" in fields:
+            raw = fields.pop("whatsapp")
+            country = fields.get("country")
+            if not country:
+                with self.db.read() as conn:
+                    row = conn.execute("SELECT country FROM leads WHERE id = ?", (lead_id,)).fetchone()
+                country = row["country"] if row else "BR"
+            wa = normalize_phone(raw, country) if raw else None
+            fields["whatsapp_e164"] = wa.e164 if wa and wa.e164 else None
+            fields["whatsapp_source"] = "manual" if fields["whatsapp_e164"] else None
+            fields["whatsapp_status"] = None
         if "website" in fields:
             fields.update({"site_analysis": None, "site_analyzed_at": None,
                            "presence_kind": "sem_site" if not fields["website"] else None})
@@ -170,7 +238,8 @@ class Repo:
         if f.get("q"):
             where.append("(name LIKE ? OR category LIKE ? OR city LIKE ? OR neighborhood LIKE ? OR phone LIKE ? OR notes LIKE ?)")
             args += [f"%{f['q']}%"] * 6
-        for key, col in (("status", "status"), ("priority", "priority"), ("segment", "segment"), ("source", "source"), ("presence", "presence_kind")):
+        for key, col in (("status", "status"), ("priority", "priority"), ("segment", "segment"), ("source", "source"),
+                         ("presence", "presence_kind"), ("country", "country")):
             if f.get(key):
                 values = [v for v in str(f[key]).split(",") if v]
                 if key == "presence" and "com_site" in values:
@@ -200,9 +269,12 @@ class Repo:
         page = max(1, int(f.get("page") or 1))
         size = max(1, min(500, int(f.get("page_size") or 50)))
         sql_where = " AND ".join(where)
-        cols = ("id, place_id, source, name, category, segment, neighborhood, city, state, phone, phone_kind, phone_e164, website, "
+        cols = ("id, place_id, source, name, category, segment, neighborhood, city, state, country, language, phone, phone_kind, phone_e164, website, "
                 "maps_url, rating, reviews_count, presence_kind, score, priority, status, consent_status, last_contact_at, "
-                "contact_count, suggested_message IS NOT NULL AS has_message, google_content_purged, created_at, updated_at")
+                "contact_count, suggested_message IS NOT NULL AS has_message, google_content_purged, created_at, updated_at, "
+                "whatsapp_e164 IS NOT NULL AS has_whatsapp, (emails IS NOT NULL AND emails != '[]' AND emails != 'null') AS has_email, "
+                "(social_links LIKE '%Instagram%') AS has_instagram, "
+                "(social_links LIKE '%Facebook%' OR website LIKE '%facebook.com%') AS has_facebook, whatsapp_status")
         with self.db.read() as conn:
             total = conn.execute(f"SELECT count(*) FROM leads WHERE {sql_where}", args).fetchone()[0]
             rows = conn.execute(f"SELECT {cols} FROM leads WHERE {sql_where} ORDER BY {order} LIMIT ? OFFSET ?",
@@ -259,6 +331,15 @@ class Repo:
             rows = conn.execute("SELECT * FROM lead_events WHERE lead_id = ? ORDER BY created_at DESC, id DESC", (lead_id,)).fetchall()
         return [dict(r, details=loads(r["details"])) for r in rows]
 
+    def outreach_events(self) -> list[dict]:
+        with self.db.read() as conn:
+            rows = conn.execute(
+                "SELECT e.lead_id, e.type, e.channel, e.created_at, e.details, l.segment, l.country, l.status, l.presence_kind "
+                "FROM lead_events e JOIN leads l ON l.id = e.lead_id "
+                "WHERE e.type IN ('mensagem_enviada', 'resposta_recebida', 'sem_whatsapp', 'opt_out') "
+                "ORDER BY e.lead_id, e.created_at, e.id").fetchall()
+        return [dict(r) for r in rows]
+
     def sent_today(self, tz: str) -> int:
         local_midnight = datetime.now(ZoneInfo(tz)).replace(hour=0, minute=0, second=0, microsecond=0)
         since = local_midnight.astimezone(timezone.utc).replace(microsecond=0).isoformat()
@@ -312,11 +393,11 @@ class Repo:
             return dict(row, done=1 if done else 0)
 
     # ------------------------------------------------------------------ supressão
-    def add_suppression(self, kind: str, value: str, reason: str, actor: str) -> None:
+    def add_suppression(self, kind: str, value: str, reason: str, actor: str, country: str = "BR") -> None:
         if kind not in ("phone", "place_id", "domain"):
             raise ValueError("Tipo de supressão inválido")
         if kind == "phone":
-            p = normalize_br_phone(value)
+            p = normalize_phone(value, country)
             value = p.e164 if p and p.e164 else value
         if kind == "domain":
             value = value.lower().removeprefix("http://").removeprefix("https://").removeprefix("www.").split("/")[0]

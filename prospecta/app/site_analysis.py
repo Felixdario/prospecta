@@ -39,6 +39,14 @@ THIRD_PARTY_DOMAINS = {
     "boaconsulta.com": "BoaConsulta", "avec.app": "Avec", "mercadolivre.com.br": "Mercado Livre",
     "shopee.com.br": "Shopee", "olx.com.br": "OLX", "cardapioweb.com": "Cardápio Web",
     "menudino.com": "MenuDino", "ola.click": "Olaclick", "gendo.app": "Gendo",
+    # Estados Unidos e outros países de língua inglesa
+    "yelp.com": "Yelp", "doordash.com": "DoorDash", "order.online": "DoorDash", "ubereats.com": "Uber Eats",
+    "grubhub.com": "Grubhub", "toasttab.com": "Toast", "opentable.com": "OpenTable", "chownow.com": "ChowNow",
+    "menufy.com": "Menufy", "clover.com": "Clover", "vagaro.com": "Vagaro", "styleseat.com": "StyleSeat",
+    "mindbodyonline.com": "Mindbody", "schedulicity.com": "Schedulicity", "glossgenius.com": "GlossGenius",
+    "nextdoor.com": "Nextdoor", "angi.com": "Angi", "homeadvisor.com": "HomeAdvisor", "thumbtack.com": "Thumbtack",
+    "houzz.com": "Houzz", "zocdoc.com": "Zocdoc", "healthgrades.com": "Healthgrades", "avvo.com": "Avvo",
+    "yell.com": "Yell", "checkatrade.com": "Checkatrade", "hipages.com.au": "hipages", "yellowpages.com": "Yellow Pages",
 }
 GOOGLE_DISCONTINUED = {"business.site": "site gratuito do Perfil da Empresa no Google", "negocio.site": "site gratuito do Perfil da Empresa no Google"}
 FREE_SUBDOMAINS = {
@@ -46,6 +54,8 @@ FREE_SUBDOMAINS = {
     "sites.google.com": "Google Sites", "blogspot.com": "Blogger", "wordpress.com": "WordPress.com",
     "weebly.com": "Weebly", "godaddysites.com": "GoDaddy", "ueniweb.com": "UENI", "comunidades.net": "Comunidades.net",
     "vercel.app": "Vercel", "netlify.app": "Netlify", "github.io": "GitHub Pages", "carrd.co": "Carrd",
+    "square.site": "Square Online (gratuito)", "squarespace.com": "Squarespace", "wix.com": "Wix", "jimdosite.com": "Jimdo",
+    "mystrikingly.com": "Strikingly", "site123.me": "SITE123", "webflow.io": "Webflow",
 }
 
 KIND_LABELS = {
@@ -147,7 +157,7 @@ def make_requests_fetcher(user_agent: str, timeout: int = 10, host_check: Callab
         current = url
         with requests.Session() as s:
             s.headers["User-Agent"] = user_agent
-            s.headers["Accept-Language"] = "pt-BR,pt;q=0.9"
+            s.headers["Accept-Language"] = "pt-BR,pt;q=0.9,en;q=0.8"
             for _ in range(6):
                 parsed = urlparse(current)
                 if parsed.scheme not in ("http", "https"):
@@ -241,6 +251,114 @@ def _social_from_links(links: list[str]) -> dict[str, str]:
     return found
 
 
+# ---------------------------------------------------------------------------------------
+# Contatos publicados pela própria empresa (WhatsApp, e-mail, Instagram)
+# ---------------------------------------------------------------------------------------
+WA_PATTERNS = (
+    re.compile(r"wa\.me/\+?(\d{8,15})", re.I),
+    re.compile(r"whatsapp\.com/send/?\?(?:[^\"'#<>\s]*?&(?:amp;)?)?phone=\+?(\d{8,15})", re.I),
+)
+EMAIL_TEXT_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+JUNK_EMAIL = ("example.", "exemplo", "sentry", "wixpress", "domain.com", "seuemail", "seu@", "email@email", "nome@",
+              "user@", "usuario@", "@2x", "yourdomain", "godaddy", "@sentry", "noreply", "no-reply")
+IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")
+CONTACT_PAGE_RE = re.compile(r"contato|contact|fale-conosco|faleconosco|atendimento|about|sobre", re.I)
+
+
+def _wa_numbers(text: str, country: str) -> list[str]:
+    from .phones import normalize_phone
+
+    found: list[str] = []
+    for pat in WA_PATTERNS:
+        for m in pat.finditer(text):
+            digits = m.group(1)
+            if country == "BR" and len(digits) in (10, 11):
+                phone = normalize_phone(digits, "BR")
+            elif country in ("US", "CA") and len(digits) == 10:
+                phone = normalize_phone(digits, country)
+            else:
+                phone = normalize_phone("+" + digits, country)
+            if phone and phone.e164 and phone.e164 not in found:
+                found.append(phone.e164)
+    return found[:3]
+
+
+def _emails(links: list[str], text: str) -> list[str]:
+    from urllib.parse import unquote
+
+    candidates: list[str] = []
+    for href in links:
+        if href.lower().startswith("mailto:"):
+            candidates += re.split(r"[,;]", unquote(href[7:].split("?")[0]))
+    candidates += [m.group(0) for m in EMAIL_TEXT_RE.finditer(text[:300_000])]
+    out: list[str] = []
+    for e in candidates:
+        e = e.strip().strip(".").lower()
+        if not EMAIL_TEXT_RE.fullmatch(e) or e.endswith(IMG_EXT) or any(j in e for j in JUNK_EMAIL):
+            continue
+        if e not in out:
+            out.append(e)
+    return out[:3]
+
+
+# Aviso publicado pela empresa de que não quer receber ofertas. Quando aparece, os e-mails da página
+# NÃO são guardados (respeita a vontade de quem publicou; na lei canadense e na americana esse aviso
+# muda o que é permitido).
+NO_SOLICIT_RE = re.compile(
+    r"\b(no|not accept(ing)?|do not send( us)?|don'?t send( us)?)\s+(unsolicited|solicitations?|sales (calls|emails|pitches)|marketing (emails|offers))"
+    r"|\bno solicit(ing|ation|ors)\b|\bnot for (solicitation|marketing)\b"
+    r"|n[ãa]o\s+(envie|enviem|aceitamos|recebemos|desejamos receber|queremos receber)\s+(propagandas?|publicidade|ofertas|spam|mensagens comerciais|e-?mails? comerciais)"
+    r"|proibido o envio de (propagandas?|publicidade|e-?mails? comerciais|ofertas)",
+    re.I)
+
+
+# Países onde o sistema lê e-mails publicados no site da empresa. Fora do Brasil, não lê:
+# nos EUA (CAN-SPAM), no Canadá (PIPEDA/CASL) e na Austrália (Spam Act) a coleta automática de
+# endereços de e-mail ("harvesting") é proibida ou agravante; no Reino Unido, autônomos contam como
+# pessoa física (PECR). Lá, um e-mail só entra se você mesmo cadastrar (ex.: a empresa passou na ligação).
+EMAIL_EXTRACTION_COUNTRIES = {"BR"}
+
+
+def extract_contacts(html: str, links: list[str], country: str = "BR") -> dict:
+    socials = _social_from_links(links)
+    no_offers = bool(NO_SOLICIT_RE.search(re.sub(r"<[^>]+>", " ", html[:300_000])))
+    read_emails = (country or "BR").upper() in EMAIL_EXTRACTION_COUNTRIES and not no_offers
+    return {
+        "whatsapp": _wa_numbers(" ".join(links) + " " + html[:300_000], country),
+        "emails": _emails(links, html) if read_emails else [],
+        "instagram": socials.get("Instagram"),
+        "facebook": socials.get("Facebook"),
+        "sem_ofertas": no_offers,
+    }
+
+
+def _merge_contacts(base: dict, extra: dict) -> dict:
+    out = dict(base)
+    for key in ("whatsapp", "emails"):
+        out[key] = list(dict.fromkeys((base.get(key) or []) + (extra.get(key) or [])))[:3]
+    for key in ("instagram", "facebook"):
+        out[key] = base.get(key) or extra.get(key)
+    out["sem_ofertas"] = bool(base.get("sem_ofertas") or extra.get("sem_ofertas"))
+    if out["sem_ofertas"]:
+        out["emails"] = []
+    return out
+
+
+def _fetch_contacts(fetcher: Fetcher, url: str, user_agent: str, country: str) -> tuple[dict, list[str]]:
+    """Visita uma página pública da empresa (ex.: Linktree ou página de contato) e extrai contatos."""
+    if not robots_allows(fetcher, url, user_agent):
+        return {}, []
+    res = fetcher(url)
+    if res.status >= 400:
+        return {}, []
+    parser = _PageParser()
+    try:
+        parser.feed(res.text)
+    except Exception:
+        pass
+    return extract_contacts(res.text, parser.links, country), parser.links
+
+
 def robots_allows(fetcher: Fetcher, url: str, user_agent: str) -> bool:
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -255,7 +373,8 @@ def robots_allows(fetcher: Fetcher, url: str, user_agent: str) -> bool:
     return rp.can_fetch(user_agent, url)
 
 
-def analyze_website(url: str | None, fetcher: Fetcher | None, user_agent: str = "ProspectaBot", now: datetime | None = None) -> dict:
+def analyze_website(url: str | None, fetcher: Fetcher | None, user_agent: str = "ProspectaBot", now: datetime | None = None,
+                    country: str = "BR") -> dict:
     """Analisa a presença digital a partir do campo "site" do perfil. Sempre retorna um dicionário."""
     now = now or datetime.now(timezone.utc)
     norm = normalize_url(url)
@@ -270,9 +389,25 @@ def analyze_website(url: str | None, fetcher: Fetcher | None, user_agent: str = 
         "issues": [],
         "signals": {},
         "social_links": {},
+        "contacts": {"whatsapp": [], "emails": [], "instagram": None, "facebook": None},
     }
-    if kind == "rede_social" or kind == "whatsapp" or kind == "agregador_links":
-        result["social_links"] = {platform: norm} if kind == "rede_social" else {}
+    if kind == "rede_social":
+        result["social_links"] = {platform: norm}
+        result["contacts"].update({"instagram": norm if platform == "Instagram" else None,
+                                   "facebook": norm if platform == "Facebook" else None})
+        return result
+    if kind == "whatsapp":
+        result["contacts"]["whatsapp"] = _wa_numbers(norm, country)
+        return result
+    if kind == "agregador_links":
+        # Página de links da própria empresa (Linktree etc.): costuma ter WhatsApp, Instagram e e-mail.
+        if fetcher is not None:
+            try:
+                contacts, links = _fetch_contacts(fetcher, norm, user_agent, country)
+                result["contacts"] = _merge_contacts(result["contacts"], contacts)
+                result["social_links"] = _social_from_links(links)
+            except Exception:
+                pass
         return result
     if kind in ("sem_site", "plataforma_terceiros", "google_descontinuado"):
         return result
@@ -333,6 +468,19 @@ def analyze_website(url: str | None, fetcher: Fetcher | None, user_agent: str = 
         "texto_visivel_caracteres": parser.text_len,
     }
     result["social_links"] = _social_from_links(parser.links)
+    contacts = extract_contacts(res.text, parser.links, country)
+    if not contacts["emails"] and not contacts["sem_ofertas"] and (country or "BR").upper() in EMAIL_EXTRACTION_COUNTRIES:
+        base_host = (urlparse(res.url).hostname or "").lower()
+        for href in parser.links:
+            target = urljoin(res.url, href)
+            if (urlparse(target).hostname or "").lower() == base_host and CONTACT_PAGE_RE.search(urlparse(target).path or ""):
+                try:
+                    extra, _ = _fetch_contacts(fetcher, target, user_agent, country)
+                    contacts = _merge_contacts(contacts, extra)
+                except Exception:
+                    pass
+                break
+    result["contacts"] = contacts
 
     issues = result["issues"]
     text_sample = res.text[:200_000]

@@ -97,3 +97,7 @@ Claude Desktop ─┤ MCP (stdio) ──► API REST (Starlette) ──► Servi
 - **Cache do Google.** Pelas regras do Google, o conteúdo (exceto `place_id`) não pode ser guardado
   indefinidamente: o sistema atualiza ou limpa após o prazo configurado.
 - **Um usuário.** Não há cadastro de vários vendedores; há um administrador e tokens de integração.
+- **Países:** Brasil, EUA, Canadá, Reino Unido e Austrália. Outros países precisam de uma entrada em
+  `app/countries.py` e, se o idioma não for português ou inglês, de modelos de mensagem novos.
+- **Hora local fora do Brasil** usa o deslocamento de fuso informado pelo Google na coleta; após mudanças
+  de horário de verão, atualize os dados do lead.
